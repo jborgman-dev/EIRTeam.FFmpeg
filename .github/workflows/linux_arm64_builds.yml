@@ -1,0 +1,48 @@
+name: Linux ARM64 Builds (Raspberry Pi)
+# Fire Geni fork addition: builds the GDExtension natively on GitHub's free
+# arm64 runners, linking the linuxarm64-lgpl-godot ffmpeg build from this
+# owner's ffmpeg-builds fork (release tag "arm64-latest").
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build-linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    name: Linux ARM64 - ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [template_debug, template_release]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - name: Download ffmpeg (linuxarm64 lgpl godot build)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download arm64-latest -R ${{ github.repository_owner }}/ffmpeg-builds -p "*linuxarm64*lgpl-godot*"
+          tar xf ./*linuxarm64*lgpl-godot*.tar.xz
+          FFDIR="$(realpath "$(find . -maxdepth 1 -type d -name '*linuxarm64*lgpl-godot*' | head -1)")"
+          echo "FFMPEG_DIR=${FFDIR}" >> "$GITHUB_ENV"
+          echo "ffmpeg at: ${FFDIR}"
+
+      - name: Setup scons
+        run: |
+          python3 --version
+          python3 -m pip install scons==4.4.0
+          scons --version
+
+      - name: Compilation
+        run: |
+          cd gdextension_build
+          scons platform=linux arch=arm64 target=${{ matrix.target }} ffmpeg_path="${FFMPEG_DIR}" debug_symbols=no
+          ls -lR build/addons/ffmpeg/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux_arm64_${{ matrix.target }}
+          path: ./gdextension_build/build/*

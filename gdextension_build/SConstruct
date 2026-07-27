@@ -52,6 +52,8 @@ if env["platform"] == "windows":
     addon_platform_dir += "win64"
 elif env["platform"] == "linux" and env["arch"] == "x86_64":
     addon_platform_dir += "linux64"
+elif env["platform"] == "linux" and env["arch"] == "arm64":
+    addon_platform_dir += "linuxarm64"
 else:
     addon_platform_dir += env["platform"]
 

@@ -1,7 +1,7 @@
 name: 🔗 GHA
+# Fire Geni fork: upstream x86_64/Windows pipeline only on manual dispatch.
+# This fork exists for the Linux ARM64 builds (linux_arm64_builds.yml).
 on:
-  push:
-  pull_request:
   workflow_dispatch:
     inputs:
       doRelease:
