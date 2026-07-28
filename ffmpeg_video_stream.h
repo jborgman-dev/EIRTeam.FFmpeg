@@ -109,6 +109,11 @@ class FFmpegVideoStreamPlayback : public VideoStreamPlayback {
 	Ref<Image> last_frame_image;
 	Ref<ImageTexture> texture;
 	Ref<Texture2DRD> yuv_texture;
+	// GL Compatibility path (no RenderingDevice): the raw YUV420P planes are
+	// uploaded into plain R8 ImageTextures (0: Y full res, 1: U, 2: V half res)
+	// so a consumer material shader can do the YUV->RGB conversion on the GPU.
+	Ref<ImageTexture> yuv_gl_textures[3];
+	bool use_gl_yuv = false;
 	bool looping = false;
 	bool buffering = false;
 	int frames_processed = 0;
@@ -138,10 +143,14 @@ private:
 
 protected:
 	void clear();
-	static void _bind_methods(){}; // Required by GDExtension, do not remove
+	static void _bind_methods();
 
 public:
 	Error load(Ref<FileAccess> p_file_access);
+
+	// GL Compatibility YUV plane access (valid when has_yuv_textures() is true).
+	bool has_yuv_textures() const;
+	Ref<Texture2D> get_yuv_texture(int p_plane_idx) const;
 
 	STREAM_FUNC_REDIRECT_0_CONST(bool, is_paused);
 	STREAM_FUNC_REDIRECT_1(void, update, double, p_delta);
@@ -161,8 +170,13 @@ public:
 class FFmpegVideoStream : public VideoStream {
 	GDCLASS(FFmpegVideoStream, VideoStream);
 
+	// Most recently instantiated playback, exposed to scripts so they can
+	// reach the GL YUV plane textures (VideoStreamPlayer does not expose its
+	// internal playback object).
+	Ref<FFmpegVideoStreamPlayback> last_playback;
+
 protected:
-	static void _bind_methods(){}; // Required by GDExtension, do not remove
+	static void _bind_methods();
 	Ref<VideoStreamPlayback> instantiate_playback_internal() {
 		Ref<FileAccess> fa = FileAccess::open(get_file(), FileAccess::READ);
 		if (!fa.is_valid()) {
@@ -173,10 +187,12 @@ protected:
 		if (pb->load(fa) != OK) {
 			return nullptr;
 		}
+		last_playback = pb;
 		return pb;
 	}
 
 public:
+	Ref<FFmpegVideoStreamPlayback> get_last_playback() const { return last_playback; }
 	STREAM_FUNC_REDIRECT_0(Ref<VideoStreamPlayback>, instantiate_playback);
 };
 

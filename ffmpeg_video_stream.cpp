@@ -192,7 +192,19 @@ void FFmpegVideoStreamPlayback::update_internal(double p_delta) {
 #ifndef FFMPEG_MT_GPU_UPLOAD
 	if (got_new_frame) {
 		// YUV conversion
-		if (last_frame->get_format() == FFmpegFrameFormat::YUV420P || last_frame->get_format() == FFmpegFrameFormat::YUVA420P) {
+		if (use_gl_yuv && (last_frame->get_format() == FFmpegFrameFormat::YUV420P || last_frame->get_format() == FFmpegFrameFormat::YUVA420P)) {
+			// GL Compatibility path: upload the raw planes straight into R8
+			// textures (~1.5 bytes/pixel total) - no CPU color conversion.
+			for (int i = 0; i < 3; i++) {
+				Ref<Image> plane = last_frame->get_yuv_image_plane(i);
+				ERR_FAIL_COND(!plane.is_valid());
+				if (yuv_gl_textures[i]->get_size() != plane->get_size()) {
+					yuv_gl_textures[i]->set_image(plane);
+				} else {
+					yuv_gl_textures[i]->update(plane);
+				}
+			}
+		} else if (last_frame->get_format() == FFmpegFrameFormat::YUV420P || last_frame->get_format() == FFmpegFrameFormat::YUVA420P) {
 			Ref<Image> y_plane = last_frame->get_yuv_image_plane(0);
 			Ref<Image> u_plane = last_frame->get_yuv_image_plane(1);
 			Ref<Image> v_plane = last_frame->get_yuv_image_plane(2);
@@ -282,9 +294,25 @@ Error FFmpegVideoStreamPlayback::load(Ref<FileAccess> p_file_access) {
 	}
 
 	if (decoder->get_frame_format() == FFmpegFrameFormat::YUV420P || decoder->get_frame_format() == FFmpegFrameFormat::YUVA420P) {
-		yuv_converter.instantiate();
-		yuv_converter->set_frame_size(size);
-		yuv_texture = yuv_converter->get_output_texture();
+		bool has_rendering_device = RS::get_singleton()->get_rendering_device() != nullptr;
+		if (has_rendering_device) {
+			yuv_converter.instantiate();
+			yuv_converter->set_frame_size(size);
+			yuv_texture = yuv_converter->get_output_texture();
+		} else {
+			// GL Compatibility: no compute converter available. Expose the raw
+			// planes as R8 textures; the consumer shader converts YUV->RGB.
+			use_gl_yuv = true;
+			for (int i = 0; i < 3; i++) {
+				int plane_w = i == 0 ? size.x : (int)Math::ceil(size.x / 2.0f);
+				int plane_h = i == 0 ? size.y : (int)Math::ceil(size.y / 2.0f);
+#ifdef GDEXTENSION
+				yuv_gl_textures[i] = ImageTexture::create_from_image(Image::create(plane_w, plane_h, false, Image::FORMAT_R8));
+#else
+				yuv_gl_textures[i] = ImageTexture::create_from_image(Image::create_empty(plane_w, plane_h, false, Image::FORMAT_R8));
+#endif
+			}
+		}
 	} else {
 #ifdef GDEXTENSION
 		texture = ImageTexture::create_from_image(Image::create(size.x, size.y, false, Image::FORMAT_RGBA8));
@@ -349,11 +377,33 @@ Ref<Texture2D> FFmpegVideoStreamPlayback::get_texture_internal() const {
 #ifdef FFMPEG_MT_GPU_UPLOAD
 	return last_frame_texture;
 #else
+	if (use_gl_yuv) {
+		// Luma-only preview; real consumers bind the planes via get_yuv_texture().
+		return yuv_gl_textures[0];
+	}
 	if (yuv_converter.is_valid()) {
 		return yuv_converter->get_output_texture();
 	}
 	return texture;
 #endif
+}
+
+bool FFmpegVideoStreamPlayback::has_yuv_textures() const {
+	return use_gl_yuv;
+}
+
+Ref<Texture2D> FFmpegVideoStreamPlayback::get_yuv_texture(int p_plane_idx) const {
+	ERR_FAIL_INDEX_V(p_plane_idx, 3, Ref<Texture2D>());
+	return yuv_gl_textures[p_plane_idx];
+}
+
+void FFmpegVideoStreamPlayback::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("has_yuv_textures"), &FFmpegVideoStreamPlayback::has_yuv_textures);
+	ClassDB::bind_method(D_METHOD("get_yuv_texture", "plane_idx"), &FFmpegVideoStreamPlayback::get_yuv_texture);
+}
+
+void FFmpegVideoStream::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_last_playback"), &FFmpegVideoStream::get_last_playback);
 }
 
 double FFmpegVideoStreamPlayback::get_playback_position_internal() const {

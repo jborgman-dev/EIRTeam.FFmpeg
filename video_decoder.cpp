@@ -185,11 +185,17 @@ Error VideoDecoder::recreate_codec_context() {
 	}
 
 	AVCodecParameters codec_params = *video_stream->codecpar;
-	// YUV conversion needs rendering device
+	// The compute-shader YUV converter needs a RenderingDevice, but plain
+	// YUV420P can also be consumed without one (e.g. GL Compatibility): the
+	// playback then exposes the raw planes as R8 textures so a consumer
+	// shader can do the YUV->RGB conversion. YUVA420P (alpha plane) still
+	// requires the compute path and falls back to CPU sws_scale RGBA when
+	// no RenderingDevice is available.
 	bool has_rendering_device = RenderingServer::get_singleton()->get_rendering_device() != nullptr;
-	bool is_yuv_pixel_fmt = codec_params.format == AVPixelFormat::AV_PIX_FMT_YUV420P || codec_params.format == AVPixelFormat::AV_PIX_FMT_YUVA420P;
-	if (is_yuv_pixel_fmt && has_rendering_device) {
-		frame_format = codec_params.format == AVPixelFormat::AV_PIX_FMT_YUV420P ? FFmpegFrameFormat::YUV420P : FFmpegFrameFormat::YUVA420P;
+	if (codec_params.format == AVPixelFormat::AV_PIX_FMT_YUV420P) {
+		frame_format = FFmpegFrameFormat::YUV420P;
+	} else if (codec_params.format == AVPixelFormat::AV_PIX_FMT_YUVA420P && has_rendering_device) {
+		frame_format = FFmpegFrameFormat::YUVA420P;
 	} else {
 		frame_format = FFmpegFrameFormat::RGBA8;
 	}
