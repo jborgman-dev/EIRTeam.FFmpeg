@@ -139,7 +139,7 @@ void FFmpegVideoStreamPlayback::update_internal(double p_delta) {
 		return;
 	}
 
-	playback_position += p_delta * 1000.0f;
+	playback_position += p_delta * playback_speed * 1000.0f;
 
 	if (decoder->get_decoder_state() == VideoDecoder::DecoderState::END_OF_STREAM && available_frames.size() == 0) {
 		// if at the end of the stream but our playback enters a valid time region again, a seek operation is required to get the decoder back on track.
@@ -400,6 +400,16 @@ Ref<Texture2D> FFmpegVideoStreamPlayback::get_yuv_texture(int p_plane_idx) const
 void FFmpegVideoStreamPlayback::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_yuv_textures"), &FFmpegVideoStreamPlayback::has_yuv_textures);
 	ClassDB::bind_method(D_METHOD("get_yuv_texture", "plane_idx"), &FFmpegVideoStreamPlayback::get_yuv_texture);
+	ClassDB::bind_method(D_METHOD("set_playback_speed", "speed"), &FFmpegVideoStreamPlayback::set_playback_speed);
+	ClassDB::bind_method(D_METHOD("get_playback_speed"), &FFmpegVideoStreamPlayback::get_playback_speed);
+}
+
+void FFmpegVideoStreamPlayback::set_playback_speed(double p_speed) {
+	playback_speed = p_speed < 0.0 ? 0.0 : p_speed;
+}
+
+double FFmpegVideoStreamPlayback::get_playback_speed() const {
+	return playback_speed;
 }
 
 void FFmpegVideoStream::_bind_methods() {

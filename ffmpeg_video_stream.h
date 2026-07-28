@@ -98,6 +98,8 @@ class FFmpegVideoStreamPlayback : public VideoStreamPlayback {
 
 	const int LENIENCE_BEFORE_SEEK = 2500;
 	double playback_position = 0.0f;
+	// Playback speed multiplier applied to the update delta (1.0 = normal).
+	double playback_speed = 1.0;
 
 	Ref<VideoDecoder> decoder;
 	List<Ref<DecodedFrame>> available_frames;
@@ -151,6 +153,12 @@ public:
 	// GL Compatibility YUV plane access (valid when has_yuv_textures() is true).
 	bool has_yuv_textures() const;
 	Ref<Texture2D> get_yuv_texture(int p_plane_idx) const;
+
+	// Playback speed multiplier (1.0 = normal). Scales the frame clock, so the
+	// decoder is consumed faster/slower accordingly; note decode cost scales
+	// with speed. Values < 0 are clamped to 0 (frozen).
+	void set_playback_speed(double p_speed);
+	double get_playback_speed() const;
 
 	STREAM_FUNC_REDIRECT_0_CONST(bool, is_paused);
 	STREAM_FUNC_REDIRECT_1(void, update, double, p_delta);
