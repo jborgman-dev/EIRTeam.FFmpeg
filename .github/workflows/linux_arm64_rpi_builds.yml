@@ -26,8 +26,14 @@ jobs:
 
       - name: Raspberry Pi OS apt repository (rpt ffmpeg with V4L2 request hwaccel)
         run: |
-          curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] https://archive.raspberrypi.com/debian/ trixie main" > /etc/apt/sources.list.d/raspi.list
+          # The key published at raspberrypi.gpg.key carries a SHA1 self-signature that
+          # Debian 13's verifier (sqv) rejects since 2026-02; the keyring *package* ships a
+          # re-certified copy, so install that and pin its hash (taken from a Pi OS unit).
+          KEYRING_DEB=raspberrypi-archive-keyring_2025.1+rpt1_all.deb
+          curl -fsSL "https://archive.raspberrypi.com/debian/pool/main/r/raspberrypi-archive-keyring/${KEYRING_DEB}" -o "/tmp/${KEYRING_DEB}"
+          dpkg -i "/tmp/${KEYRING_DEB}"
+          echo "3a29901549ae65a910de13a32551e6eea7f45ba1fd70f0cb67e5c70d98488071  /usr/share/keyrings/raspberrypi-archive-keyring.pgp" | sha256sum -c -
+          echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.pgp] https://archive.raspberrypi.com/debian/ trixie main" > /etc/apt/sources.list.d/raspi.list
           printf 'Package: *\nPin: origin archive.raspberrypi.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/raspi
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libdrm-dev libudev-dev
