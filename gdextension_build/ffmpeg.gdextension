@@ -33,13 +33,8 @@ linux.x86_64 =
     "res://addons/ffmpeg/linux64/libswresample.so.4": "",
     "res://addons/ffmpeg/linux64/libswscale.so.7": ""}
 
-linux.arm64 =
-    {"res://addons/ffmpeg/linuxarm64/libavcodec.so.60": "",
-    "res://addons/ffmpeg/linuxarm64/libavfilter.so.9": "",
-    "res://addons/ffmpeg/linuxarm64/libavformat.so.60": "",
-    "res://addons/ffmpeg/linuxarm64/libavutil.so.58": "",
-    "res://addons/ffmpeg/linuxarm64/libswresample.so.4": "",
-    "res://addons/ffmpeg/linuxarm64/libswscale.so.7": ""}
+; linux.arm64 (Raspberry Pi) has no bundled FFmpeg: the plugin links the
+; Raspberry Pi OS system libraries (libavcodec61 etc., V4L2 request hwaccel).
 
 android.arm64 =
     {

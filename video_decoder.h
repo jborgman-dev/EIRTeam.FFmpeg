@@ -60,6 +60,7 @@ using namespace godot;
 #include "ffmpeg_frame.h"
 extern "C" {
 #include "libavformat/avformat.h"
+#include "libavutil/hwcontext.h"
 #include "libswresample/swresample.h"
 #include "libswscale/swscale.h"
 }
@@ -111,17 +112,6 @@ public:
 
 class VideoDecoder : public RefCounted {
 public:
-	enum HardwareVideoDecoder {
-		NONE = 0,
-		NVDEC = 1,
-		INTEL_QUICK_SYNC = 2,
-		DXVA2 = 4,
-		VDPAU = 8,
-		VAAPI = 16,
-		ANDROID_MEDIACODEC = 32,
-		APPLE_VIDEOTOOLBOX = 64,
-		ANY = INT_MAX,
-	};
 	enum DecoderState {
 		READY,
 		RUNNING,
@@ -148,7 +138,6 @@ private:
 	AVCodecContext *audio_codec_context = nullptr;
 	bool input_opened = false;
 	bool has_audio = false;
-	bool hw_decoding_allowed = false;
 	double video_time_base_in_seconds;
 	double audio_time_base_in_seconds;
 	double duration;
@@ -156,11 +145,8 @@ private:
 	SafeFlag skip_current_outputs;
 	SafeNumeric<float> last_decoded_frame_time;
 	Ref<FileAccess> video_file;
-	BitField<HardwareVideoDecoder> target_hw_video_decoders = HardwareVideoDecoder::ANY;
 	Ref<core_bind::Mutex> available_textures_mutex;
 	List<Ref<ImageTexture>> available_textures;
-	Ref<core_bind::Mutex> hw_transfer_frames_mutex;
-	List<Ref<FFmpegFrame>> hw_transfer_frames;
 	Ref<core_bind::Mutex> scaler_frames_mutex;
 	List<Ref<FFmpegFrame>> scaler_frames;
 	Ref<core_bind::Mutex> decoded_frames_mutex;
@@ -171,21 +157,34 @@ private:
 
 	bool looping = false;
 
+	// --- Hardware decode (Linux V4L2 request API via libavcodec's DRM
+	// hwaccel, e.g. the Raspberry Pi 5 HEVC decoder), "copy route": the
+	// decoder outputs AV_PIX_FMT_DRM_PRIME frames which are downloaded into a
+	// persistent planar YUV420P frame (the DRM hwframe layer does the tiled ->
+	// planar conversion) and then handed to the regular YUV plane path. ---
+	bool hw_decode_enabled = false; // current video_codec_context has a DRM hw_device_ctx attached
+	bool hw_decode_blocked = false; // hw init/transfer failed once (or disabled): never retry on this decoder
+	bool hw_first_frame_logged = false;
+	SafeFlag hw_failed; // set on the decode thread when the hwaccel could not be used
+	Ref<FFmpegFrame> hw_sw_frame; // persistent YUV420P download target (buffers reused across frames)
+
+	static AVPixelFormat _hw_get_format(AVCodecContext *p_ctx, const AVPixelFormat *p_fmts);
+	bool _hw_decode_wanted(const AVCodec *p_decoder, const AVCodecParameters &p_params) const;
+	Error _open_video_codec(bool p_allow_hw);
+	void _fallback_to_software(AVPacket *p_packet);
+
 	static int _read_packet_callback(void *p_opaque, uint8_t *p_buf, int p_buf_size);
 	static int64_t _stream_seek_callback(void *p_opaque, int64_t p_offset, int p_whence);
 	void prepare_decoding();
 	Error recreate_codec_context();
-	static HardwareVideoDecoder from_av_hw_device_type(AVHWDeviceType p_device_type);
 
 	void _seek_command(double p_target_timestamp);
 	static void _thread_func(void *userdata);
 	void _decode_next_frame(AVPacket *p_packet, AVFrame *p_receive_frame);
 	int _send_packet(AVCodecContext *p_codec_context, AVFrame *p_receive_frame, AVPacket *p_packet);
-	void _try_disable_hw_decoding(int p_error_code);
 	void _read_decoded_frames(AVFrame *p_received_frame);
 	void _read_decoded_audio_frames(AVFrame *p_received_frame);
 
-	void _hw_transfer_frame_return(Ref<FFmpegFrame> p_hw_frame);
 	void _scaler_frame_return(Ref<FFmpegFrame> p_hw_frame);
 
 	Ref<FFmpegFrame> _ensure_frame_pixel_format(Ref<FFmpegFrame> p_frame, AVPixelFormat p_target_pixel_format);
@@ -194,13 +193,8 @@ private:
 	String _codec_id_to_preferred_decoder_name(AVCodecID p_codec_id) const;
 
 public:
-	struct AvailableDecoderInfo {
-		Ref<FFmpegCodec> codec;
-		AVHWDeviceType device_type;
-	};
 	void seek(double p_time, bool p_wait = false);
 	void start_decoding();
-	Vector<AvailableDecoderInfo> get_available_video_decoders(const AVInputFormat *p_format, AVCodecID p_codec_id, BitField<HardwareVideoDecoder> p_target_decoders);
 	void return_frames(Vector<Ref<DecodedFrame>> p_frames);
 	void return_frame(Ref<DecodedFrame> p_frame);
 	Vector<Ref<DecodedFrame>> get_decoded_frames();
@@ -213,6 +207,8 @@ public:
 	int get_audio_mix_rate() const;
 	int get_audio_channel_count() const;
 	FFmpegFrameFormat get_frame_format() const { return frame_format; }
+	// True once at least one frame has actually been produced by the hardware decoder.
+	bool is_hardware_decoding() const { return hw_decode_enabled && hw_first_frame_logged; }
 
 	VideoDecoder(Ref<FileAccess> p_file);
 	~VideoDecoder();

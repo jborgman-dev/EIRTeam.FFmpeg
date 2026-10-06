@@ -59,7 +59,7 @@ else:
 
 opts = Variables([], ARGUMENTS)
 opts.Add(BoolVariable("verbose", "Enable verbose output for the compilation", False))
-opts.Add(("ffmpeg_path", "Path to FFmpeg", ""))
+opts.Add(("ffmpeg_path", "Path to an FFmpeg build (lib/ + include/), or 'system' to link the distro FFmpeg via pkg-config", ""))
 
 opts.Update(env)
 
@@ -74,12 +74,19 @@ env.Append(CPPPATH=["../"])
 sources = Glob("../*.cpp")
 sources.extend(Glob("*.cpp"))
 ffmpeg_path = env["ffmpeg_path"]
+# 'system' links against the distribution's FFmpeg (e.g. Raspberry Pi OS 7.1
+# with the V4L2 request hwaccel). Debian headers are multiarch, so pkg-config
+# is the only reliable way to find them; no libav* files are bundled then.
+use_system_ffmpeg = ffmpeg_path == "system"
 
 ffmpeg_libs = ["avcodec", "avfilter", "avformat", "avutil", "swresample", "swscale"]
 
-env.Append(LIBS=ffmpeg_libs)
-env.Prepend(CPPPATH=f"{ffmpeg_path}/include")
-env.Append(LIBPATH=[f"{ffmpeg_path}/lib"])
+if use_system_ffmpeg:
+    env.ParseConfig("pkg-config --cflags --libs " + " ".join(f"lib{lib}" for lib in ffmpeg_libs))
+else:
+    env.Append(LIBS=ffmpeg_libs)
+    env.Prepend(CPPPATH=f"{ffmpeg_path}/include")
+    env.Append(LIBPATH=[f"{ffmpeg_path}/lib"])
 
 if env["platform"] == "windows" and sys.platform == "win32" and not env.get("is_msvc", False):
     # Workaround for https://github.com/godotengine/godot-cpp/issues/1064
@@ -118,16 +125,18 @@ def install_gdextension_libname(target, source, env):
     methods.osx_rename_libname("^@.*framework/", "@loader_path/../", "", [lib.get_path() for lib in target])
 
 
-ffmpeg_install_action = ffmpeg_download.ffmpeg_install(env, f"#{addon_platform_dir}", ffmpeg_path)
 env.Depends(sources, env.Install(addon_base_dir, "ffmpeg.gdextension"))
-env.Depends(sources, ffmpeg_install_action)
+ffmpeg_install_action = None
+if not use_system_ffmpeg:
+    ffmpeg_install_action = ffmpeg_download.ffmpeg_install(env, f"#{addon_platform_dir}", ffmpeg_path)
+    env.Depends(sources, ffmpeg_install_action)
 
 env.GLSL_HEADER("../yuv_to_rgb.glsl")
 env.Depends(Glob("../*.glsl.gen.h"), ["#glsl_builders.py"])
 
 Default(library)
 
-if env["platform"] == "macos":
+if env["platform"] == "macos" and ffmpeg_install_action is not None:
     env.AddPostAction(ffmpeg_install_action, env.Action(install_ffmpeg_libname))
     env.AddPostAction(library, env.Action(install_gdextension_libname))
 

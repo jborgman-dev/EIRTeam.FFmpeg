@@ -4,7 +4,7 @@ name: Linux ARM64 Builds (Raspberry Pi)
 # owner's ffmpeg-builds fork (release tag "arm64-latest").
 on:
   workflow_dispatch:
-  push:
+  # push trigger removed: the bundled-ffmpeg-6.1 build is legacy; see linux_arm64_rpi_builds.yml
 
 jobs:
   build-linux-arm64:

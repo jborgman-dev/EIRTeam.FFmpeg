@@ -1,0 +1,58 @@
+name: Linux ARM64 Builds (Raspberry Pi OS ffmpeg, V4L2 request hwaccel)
+# Fire Geni fork addition: builds the GDExtension for Raspberry Pi 5 against the
+# Raspberry Pi OS *system* FFmpeg 7.1 (libavcodec61 etc.), which carries the
+# V4L2 request-API hwaccel for the rpivid HEVC decoder. No libav* libraries are
+# bundled; target units install the matching apt packages instead.
+on:
+  workflow_dispatch:
+  push:
+    branches: [hevc-v4l2, firegeni-arm64]
+
+jobs:
+  build-linux-arm64-rpi:
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    name: Linux ARM64 (Pi OS ffmpeg) - ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [template_debug, template_release]
+    steps:
+      - name: Base tools (git must exist before checkout inside the container)
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg git build-essential pkg-config python3 scons binutils
+          git config --global --add safe.directory '*'
+
+      - name: Raspberry Pi OS apt repository (rpt ffmpeg with V4L2 request hwaccel)
+        run: |
+          curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] https://archive.raspberrypi.com/debian/ trixie main" > /etc/apt/sources.list.d/raspi.list
+          printf 'Package: *\nPin: origin archive.raspberrypi.com\nPin-Priority: 600\n' > /etc/apt/preferences.d/raspi
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev libdrm-dev libudev-dev
+          # Fail loudly if we silently got stock Debian ffmpeg (no hwaccel).
+          dpkg -s libavcodec-dev | grep '^Version' | tee /dev/stderr | grep -q rpt
+          pkg-config --modversion libavcodec
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Compilation
+        run: |
+          cd gdextension_build
+          scons -j"$(nproc)" platform=linux arch=arm64 target=${{ matrix.target }} ffmpeg_path=system debug_symbols=no
+          ls -lR build/addons/ffmpeg/
+
+      - name: Verify link against the system ffmpeg (so.61 family)
+        run: |
+          SO=$(ls gdextension_build/build/addons/ffmpeg/linuxarm64/libgdffmpeg*.so)
+          readelf -d "$SO" | grep -E 'NEEDED|RUNPATH'
+          readelf -d "$SO" | grep NEEDED | grep -q 'libavcodec.so.61'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux_arm64_rpi_${{ matrix.target }}
+          path: ./gdextension_build/build/*

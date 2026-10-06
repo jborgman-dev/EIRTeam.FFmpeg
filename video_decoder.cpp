@@ -200,30 +200,10 @@ Error VideoDecoder::recreate_codec_context() {
 		frame_format = FFmpegFrameFormat::RGBA8;
 	}
 
-	const AVCodec *decoder = forced_video_codec;
-	if (!decoder) {
-		decoder = avcodec_find_decoder(video_stream->codecpar->codec_id);
+	Error open_video_result = _open_video_codec(!hw_decode_blocked);
+	if (open_video_result != OK) {
+		return open_video_result;
 	}
-	if (video_codec_context != nullptr) {
-		avcodec_free_context(&video_codec_context);
-	}
-	video_codec_context = avcodec_alloc_context3(decoder);
-	video_codec_context->pkt_timebase = video_stream->time_base;
-
-	ERR_FAIL_COND_V_MSG(video_codec_context == nullptr, FAILED, vformat("Couldn't allocate codec context: %s", decoder->name));
-
-	int param_copy_result = avcodec_parameters_to_context(video_codec_context, &codec_params);
-
-	ERR_FAIL_COND_V_MSG(param_copy_result < 0, FAILED, vformat("Couldn't copy codec parameters from %s: %s", decoder->name, ffmpeg_get_error_message(param_copy_result)));
-
-	video_codec_context->thread_count = 0;
-
-	int open_codec_result = avcodec_open2(video_codec_context, decoder, nullptr);
-	ERR_FAIL_COND_V_MSG(open_codec_result < 0, FAILED, vformat("Error trying to open %s codec: %s", decoder->name, ffmpeg_get_error_message(open_codec_result)));
-
-	print_line("Succesfully initialized video decoder:", decoder->long_name);
-
-	ERR_FAIL_COND_V_MSG(video_codec_context == nullptr, ERR_CANT_CREATE, vformat("Error creating video codec context: Exhausted all available decoders for codec %s", avcodec_get_name(codec_params.codec_id)));
 
 	if (!audio_stream) {
 		return OK;
@@ -246,6 +226,134 @@ Error VideoDecoder::recreate_codec_context() {
 		has_audio = true;
 	}
 	return OK;
+}
+
+bool VideoDecoder::_hw_decode_wanted(const AVCodec *p_decoder, const AVCodecParameters &p_params) const {
+#if defined(__linux__) && !defined(__ANDROID__)
+	if (p_params.codec_id != AV_CODEC_ID_HEVC) {
+		return false;
+	}
+	// Only plain 8-bit 4:2:0: the downloaded frame must land on the YUV420P
+	// plane path (Main10 / 4:2:2 stay on the untouched software route).
+	if (p_params.format != AV_PIX_FMT_YUV420P || frame_format != FFmpegFrameFormat::YUV420P) {
+		return false;
+	}
+	if (OS::get_singleton()->get_environment("FIREGENI_HWDEC") == "0") {
+		print_line("HEVC: hardware decode disabled by FIREGENI_HWDEC=0");
+		return false;
+	}
+	// Only when this libavcodec build actually has a DRM-device hwaccel for the
+	// decoder (Raspberry Pi OS ffmpeg); stock builds simply never match.
+	for (int i = 0;; i++) {
+		const AVCodecHWConfig *config = avcodec_get_hw_config(p_decoder, i);
+		if (config == nullptr) {
+			break;
+		}
+		if (config->device_type == AV_HWDEVICE_TYPE_DRM && (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && config->pix_fmt == AV_PIX_FMT_DRM_PRIME) {
+			return true;
+		}
+	}
+	print_line("HEVC: no DRM hardware decoder in this FFmpeg build, software decode");
+#endif
+	return false;
+}
+
+AVPixelFormat VideoDecoder::_hw_get_format(AVCodecContext *p_ctx, const AVPixelFormat *p_fmts) {
+	VideoDecoder *self = static_cast<VideoDecoder *>(p_ctx->opaque);
+	for (const AVPixelFormat *p = p_fmts; *p != AV_PIX_FMT_NONE; p++) {
+		if (*p == AV_PIX_FMT_DRM_PRIME) {
+			return *p;
+		}
+	}
+	// DRM_PRIME is not offered: either the hwaccel failed to initialize (libavcodec
+	// then re-asks without the failed format) or this stream has no hwaccel. Pick a
+	// software format so decoding continues, and flag the decoder for a clean
+	// software re-open (the current context is single-threaded, see _open_video_codec).
+	if (self != nullptr) {
+		self->hw_failed.set();
+	}
+	for (const AVPixelFormat *p = p_fmts; *p != AV_PIX_FMT_NONE; p++) {
+		if (!is_hardware_pixel_format(*p)) {
+			return *p;
+		}
+	}
+	return AV_PIX_FMT_NONE;
+}
+
+Error VideoDecoder::_open_video_codec(bool p_allow_hw) {
+	AVCodecParameters codec_params = *video_stream->codecpar;
+	const AVCodec *decoder = forced_video_codec;
+	if (!decoder) {
+		decoder = avcodec_find_decoder(codec_params.codec_id);
+	}
+	ERR_FAIL_COND_V_MSG(decoder == nullptr, ERR_CANT_CREATE, vformat("Error creating video codec context: no decoder for codec %s", avcodec_get_name(codec_params.codec_id)));
+
+	AVCodecContext *new_context = avcodec_alloc_context3(decoder);
+	ERR_FAIL_COND_V_MSG(new_context == nullptr, FAILED, vformat("Couldn't allocate codec context: %s", decoder->name));
+	new_context->pkt_timebase = video_stream->time_base;
+
+	int param_copy_result = avcodec_parameters_to_context(new_context, &codec_params);
+	if (param_copy_result < 0) {
+		avcodec_free_context(&new_context);
+		ERR_FAIL_V_MSG(FAILED, vformat("Couldn't copy codec parameters from %s: %s", decoder->name, ffmpeg_get_error_message(param_copy_result)));
+	}
+
+	new_context->thread_count = 0;
+	bool use_hw = false;
+	if (p_allow_hw && _hw_decode_wanted(decoder, codec_params)) {
+		AVBufferRef *hw_device = nullptr;
+		// A null device path is accepted by the Raspberry Pi DRM hwcontext; the
+		// V4L2 request hwaccel locates /dev/media*/video* itself via udev.
+		int hw_create_result = av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_DRM, nullptr, nullptr, 0);
+		if (hw_create_result >= 0) {
+			new_context->hw_device_ctx = hw_device; // owned by the context, freed with it
+			new_context->get_format = &VideoDecoder::_hw_get_format;
+			new_context->opaque = this;
+			// The hardware decoder is far faster than realtime; with a single
+			// thread the hwaccel init (and any failure) happens synchronously
+			// on our decode thread, which keeps the fallback deterministic.
+			new_context->thread_count = 1;
+			use_hw = true;
+		} else {
+			print_line(vformat("HEVC: DRM hardware device unavailable (%s), software decode", ffmpeg_get_error_message(hw_create_result)));
+		}
+	}
+
+	int open_codec_result = avcodec_open2(new_context, decoder, nullptr);
+	if (open_codec_result < 0) {
+		avcodec_free_context(&new_context);
+		ERR_FAIL_V_MSG(FAILED, vformat("Error trying to open %s codec: %s", decoder->name, ffmpeg_get_error_message(open_codec_result)));
+	}
+
+	if (video_codec_context != nullptr) {
+		avcodec_free_context(&video_codec_context);
+	}
+	video_codec_context = new_context;
+	hw_decode_enabled = use_hw;
+	hw_first_frame_logged = false;
+	hw_failed.clear();
+
+	print_line("Succesfully initialized video decoder:", decoder->long_name, use_hw ? "(DRM hardware decode requested)" : "");
+	return OK;
+}
+
+void VideoDecoder::_fallback_to_software(AVPacket *p_packet) {
+	print_line("HEVC: hardware decode unavailable - recreating decoder in software mode");
+	hw_decode_blocked = true;
+	hw_sw_frame.unref();
+	if (p_packet != nullptr && p_packet->buf != nullptr) {
+		av_packet_unref(p_packet);
+	}
+	if (_open_video_codec(false) != OK) {
+		decoder_state = DecoderState::FAULTED;
+		return;
+	}
+	// Restart from the beginning so no frames are lost; the failure always
+	// happens within the first packets of the stream.
+	av_seek_frame(format_context, video_stream->index, 0, AVSEEK_FLAG_BACKWARD);
+	if (has_audio) {
+		avcodec_flush_buffers(audio_codec_context);
+	}
 }
 
 void VideoDecoder::_seek_command(double p_target_timestamp) {
@@ -311,6 +419,13 @@ void VideoDecoder::_thread_func(void *userdata) {
 void VideoDecoder::_decode_next_frame(AVPacket *p_packet, AVFrame *p_receive_frame) {
 	ZoneScopedN("Video decoder decode next frame");
 	int read_frame_result = 0;
+
+	if (hw_decode_enabled && hw_failed.is_set()) {
+		_fallback_to_software(p_packet);
+		if (decoder_state == DecoderState::FAULTED) {
+			return;
+		}
+	}
 
 	if (p_packet->buf == nullptr) {
 		read_frame_result = av_read_frame(format_context, p_packet);
@@ -397,6 +512,37 @@ void VideoDecoder::_read_decoded_frames(AVFrame *p_received_frame) {
 		double frame_time = (frame_timestamp - video_stream->start_time) * video_time_base_in_seconds * 1000.0;
 
 		if (skip_output_until_time > frame_time || skip_current_outputs.is_set()) {
+			av_frame_unref(p_received_frame);
+			continue;
+		}
+
+		if (p_received_frame->format == AV_PIX_FMT_DRM_PRIME) {
+			ZoneNamedN(hw_frame_download, "HW frame download", true);
+			if (!hw_sw_frame.is_valid()) {
+				hw_sw_frame.instantiate();
+				// The DRM hwframe layer offers planar YUV420P as download format
+				// for the tiled decoder output and converts while copying.
+				hw_sw_frame->get_frame()->format = AV_PIX_FMT_YUV420P;
+			}
+			int transfer_result = av_hwframe_transfer_data(hw_sw_frame->get_frame(), p_received_frame, 0);
+			// Hand the DMA buffer straight back to the decoder's pool.
+			av_frame_unref(p_received_frame);
+			if (transfer_result < 0) {
+				print_line(vformat("HEVC: hardware frame download failed: %s", ffmpeg_get_error_message(transfer_result)));
+				hw_failed.set();
+				break;
+			}
+			if (!hw_first_frame_logged) {
+				print_line("HEVC hardware decode active (V4L2 request)");
+				hw_first_frame_logged = true;
+			}
+			last_decoded_frame_time.set(frame_time);
+			Ref<DecodedFrame> yuv_frame = _unwrap_yuv_frame(frame_time, hw_sw_frame, FFmpegFrameFormat::YUV420P);
+			decoded_frames_mutex->lock();
+			if (!skip_current_outputs.is_set()) {
+				decoded_frames.push_back(yuv_frame);
+			}
+			decoded_frames_mutex->unlock();
 			continue;
 		}
 
@@ -789,7 +935,6 @@ int VideoDecoder::get_audio_channel_count() const {
 VideoDecoder::VideoDecoder(Ref<FileAccess> p_file) {
 	video_file = p_file;
 	available_textures_mutex.instantiate();
-	hw_transfer_frames_mutex.instantiate();
 	scaler_frames_mutex.instantiate();
 	decoded_frames_mutex.instantiate();
 	audio_buffer_mutex.instantiate();

@@ -160,6 +160,9 @@ public:
 	void set_playback_speed(double p_speed);
 	double get_playback_speed() const;
 
+	// True while frames come from a hardware decoder (Linux DRM/V4L2 request).
+	bool is_hardware_decoding() const;
+
 	STREAM_FUNC_REDIRECT_0_CONST(bool, is_paused);
 	STREAM_FUNC_REDIRECT_1(void, update, double, p_delta);
 	STREAM_FUNC_REDIRECT_0_CONST(bool, is_playing);

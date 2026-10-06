@@ -402,6 +402,7 @@ void FFmpegVideoStreamPlayback::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_yuv_texture", "plane_idx"), &FFmpegVideoStreamPlayback::get_yuv_texture);
 	ClassDB::bind_method(D_METHOD("set_playback_speed", "speed"), &FFmpegVideoStreamPlayback::set_playback_speed);
 	ClassDB::bind_method(D_METHOD("get_playback_speed"), &FFmpegVideoStreamPlayback::get_playback_speed);
+	ClassDB::bind_method(D_METHOD("is_hardware_decoding"), &FFmpegVideoStreamPlayback::is_hardware_decoding);
 }
 
 void FFmpegVideoStreamPlayback::set_playback_speed(double p_speed) {
@@ -410,6 +411,10 @@ void FFmpegVideoStreamPlayback::set_playback_speed(double p_speed) {
 
 double FFmpegVideoStreamPlayback::get_playback_speed() const {
 	return playback_speed;
+}
+
+bool FFmpegVideoStreamPlayback::is_hardware_decoding() const {
+	return decoder.is_valid() && decoder->is_hardware_decoding();
 }
 
 void FFmpegVideoStream::_bind_methods() {
