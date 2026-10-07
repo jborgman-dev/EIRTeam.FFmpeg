@@ -32,6 +32,7 @@
 #define FFMPEG_VIDEO_STREAM_H
 
 #include "video_decoder.h"
+#include "zero_copy_gl.h"
 
 #ifdef GDEXTENSION
 
@@ -116,6 +117,16 @@ class FFmpegVideoStreamPlayback : public VideoStreamPlayback {
 	// so a consumer material shader can do the YUV->RGB conversion on the GPU.
 	Ref<ImageTexture> yuv_gl_textures[3];
 	bool use_gl_yuv = false;
+	// Zero-copy route (Linux GL Compatibility + DRM hardware decoder): the
+	// decoder's DMABuf frames are imported as two GL textures (Y R8, UV RG8)
+	// exposed as RIDs; no download, no upload. Falls back to the plane upload
+	// route above if an import fails.
+	bool use_zero_copy = false;
+	bool zero_copy_failed = false;
+	ZeroCopyGL::Importer zero_copy;
+	// Frames whose DMABuf the GPU may still be reading (the two most recently
+	// displayed frames); returned to the decoder only after that window.
+	Ref<DecodedFrame> retired_frames[2];
 	bool looping = false;
 	bool buffering = false;
 	int frames_processed = 0;
@@ -163,6 +174,14 @@ public:
 	// True while frames come from a hardware decoder (Linux DRM/V4L2 request).
 	bool is_hardware_decoding() const;
 
+	// Zero-copy GL textures (valid when has_zerocopy_textures() is true):
+	// plane 0 = Y (R8), plane 1 = interleaved UV (RG8). Bind them to a
+	// ShaderMaterial with RenderingServer.material_set_param(material_rid,
+	// "y_tex" / "uv_tex", rid).
+	bool has_zerocopy_textures() const;
+	RID get_zerocopy_texture_rid(int p_plane_idx) const;
+	bool is_zero_copy() const;
+
 	STREAM_FUNC_REDIRECT_0_CONST(bool, is_paused);
 	STREAM_FUNC_REDIRECT_1(void, update, double, p_delta);
 	STREAM_FUNC_REDIRECT_0_CONST(bool, is_playing);
@@ -176,6 +195,7 @@ public:
 	STREAM_FUNC_REDIRECT_0_CONST(int, get_mix_rate);
 	STREAM_FUNC_REDIRECT_0_CONST(int, get_channels);
 	FFmpegVideoStreamPlayback();
+	~FFmpegVideoStreamPlayback();
 };
 
 class FFmpegVideoStream : public VideoStream {

@@ -73,6 +73,9 @@ enum FFmpegFrameFormat {
 	RGBA8,
 	YUV420P,
 	YUVA420P,
+	// Hardware frame left in the decoder's DMABuf (zero-copy route): no planes
+	// in system memory, the playback imports it as GL textures via EGL.
+	NV12_DMABUF,
 };
 
 class DecodedFrame : public RefCounted {
@@ -80,12 +83,15 @@ class DecodedFrame : public RefCounted {
 	Ref<ImageTexture> texture;
 	Ref<Image> image;
 	Ref<Image> yuv_images[4];
+	Ref<FFmpegFrame> hw_frame; // NV12_DMABUF: keeps the DRM_PRIME AVFrame (and its buffers) alive
 	FFmpegFrameFormat format;
 
 public:
 	Ref<ImageTexture> get_texture() const;
 	void set_texture(const Ref<ImageTexture> &p_texture);
 	Ref<Image> get_image() const { return image; };
+	void set_hw_frame(const Ref<FFmpegFrame> &p_frame) { hw_frame = p_frame; }
+	Ref<FFmpegFrame> get_hw_frame() const { return hw_frame; }
 
 	double get_time() const;
 	void set_time(double p_time);
@@ -167,6 +173,10 @@ private:
 	bool hw_first_frame_logged = false;
 	SafeFlag hw_failed; // set on the decode thread when the hwaccel could not be used
 	Ref<FFmpegFrame> hw_sw_frame; // persistent YUV420P download target (buffers reused across frames)
+	// Zero-copy route (see zero_copy_gl.h): when set, DRM_PRIME frames are handed
+	// over as NV12_DMABUF DecodedFrames instead of being downloaded. Toggled from
+	// the playback (main thread), read on the decode thread.
+	SafeFlag zero_copy_output;
 
 	static AVPixelFormat _hw_get_format(AVCodecContext *p_ctx, const AVPixelFormat *p_fmts);
 	bool _hw_decode_wanted(const AVCodec *p_decoder, const AVCodecParameters &p_params) const;
@@ -209,6 +219,14 @@ public:
 	FFmpegFrameFormat get_frame_format() const { return frame_format; }
 	// True once at least one frame has actually been produced by the hardware decoder.
 	bool is_hardware_decoding() const { return hw_decode_enabled && hw_first_frame_logged; }
+	void set_zero_copy_output(bool p_enabled) {
+		if (p_enabled) {
+			zero_copy_output.set();
+		} else {
+			zero_copy_output.clear();
+		}
+	}
+	bool is_zero_copy_output() const { return zero_copy_output.is_set(); }
 
 	VideoDecoder(Ref<FileAccess> p_file);
 	~VideoDecoder();

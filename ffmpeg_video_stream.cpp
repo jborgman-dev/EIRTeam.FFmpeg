@@ -178,7 +178,14 @@ void FFmpegVideoStreamPlayback::update_internal(double p_delta) {
 		just_seeked = false;
 
 		if (last_frame.is_valid()) {
-			decoder->return_frame(last_frame);
+			// Retire through a two-frame window: on the zero-copy route the GPU
+			// may still be sampling the previous frames' DMABufs, and the
+			// decoder must not recycle those buffers until that is over.
+			if (retired_frames[1].is_valid()) {
+				decoder->return_frame(retired_frames[1]);
+			}
+			retired_frames[1] = retired_frames[0];
+			retired_frames[0] = last_frame;
 		}
 		last_frame = next_frame->get();
 		last_frame_image = last_frame->get_image();
@@ -192,7 +199,21 @@ void FFmpegVideoStreamPlayback::update_internal(double p_delta) {
 #ifndef FFMPEG_MT_GPU_UPLOAD
 	if (got_new_frame) {
 		// YUV conversion
-		if (use_gl_yuv && (last_frame->get_format() == FFmpegFrameFormat::YUV420P || last_frame->get_format() == FFmpegFrameFormat::YUVA420P)) {
+		if (last_frame->get_format() == FFmpegFrameFormat::NV12_DMABUF) {
+			// Zero-copy route: import the decoder's DMABuf as GL textures. Runs on
+			// the thread that drives update() = the GL thread with Godot's default
+			// single-threaded Compatibility renderer (verified by the probe).
+			if (use_zero_copy && !zero_copy_failed) {
+				Ref<FFmpegFrame> hw = last_frame->get_hw_frame();
+				if (!hw.is_valid() || !zero_copy.bind_frame(hw->get_frame())) {
+					zero_copy_failed = true;
+					decoder->set_zero_copy_output(false);
+					print_line("Zero-copy video: import failed, this stream continues on the copy route");
+				}
+			}
+			// Frames still queued as DMABuf after a fallback cannot be shown; the
+			// decoder delivers downloaded planes from the next frame on.
+		} else if (use_gl_yuv && (last_frame->get_format() == FFmpegFrameFormat::YUV420P || last_frame->get_format() == FFmpegFrameFormat::YUVA420P)) {
 			// GL Compatibility path: upload the raw planes straight into R8
 			// textures (~1.5 bytes/pixel total) - no CPU color conversion.
 			for (int i = 0; i < 3; i++) {
@@ -287,6 +308,13 @@ void FFmpegVideoStreamPlayback::update_internal(double p_delta) {
 Error FFmpegVideoStreamPlayback::load(Ref<FileAccess> p_file_access) {
 	decoder = Ref<VideoDecoder>(memnew(VideoDecoder(p_file_access)));
 
+	// Zero-copy only matters for DRM_PRIME (hardware) frames, so it is safe to
+	// request before we know the stream format; the decoder ignores it otherwise.
+	// The probe also verifies that this thread owns Godot's EGL context.
+	if (ZeroCopyGL::is_available()) {
+		decoder->set_zero_copy_output(true);
+	}
+
 	decoder->start_decoding();
 	Vector2i size = decoder->get_size();
 	if (decoder->get_decoder_state() == VideoDecoder::FAULTED) {
@@ -303,6 +331,19 @@ Error FFmpegVideoStreamPlayback::load(Ref<FileAccess> p_file_access) {
 			// GL Compatibility: no compute converter available. Expose the raw
 			// planes as R8 textures; the consumer shader converts YUV->RGB.
 			use_gl_yuv = true;
+			if (decoder->is_zero_copy_output()) {
+				// Create the zero-copy textures (video black) right away so a
+				// consumer can bind their RIDs before the first frame arrives. The
+				// R8 plane textures below stay as the fallback target.
+				if (zero_copy.prepare(size.x, size.y)) {
+					use_zero_copy = true;
+				} else {
+					decoder->set_zero_copy_output(false);
+					print_line("Zero-copy video: texture setup failed, using the copy route");
+				}
+			} else {
+				print_line(vformat("Zero-copy video: not used (%s)", ZeroCopyGL::unavailable_reason()));
+			}
 			for (int i = 0; i < 3; i++) {
 				int plane_w = i == 0 ? size.x : (int)Math::ceil(size.x / 2.0f);
 				int plane_h = i == 0 ? size.y : (int)Math::ceil(size.y / 2.0f);
@@ -397,7 +438,31 @@ Ref<Texture2D> FFmpegVideoStreamPlayback::get_yuv_texture(int p_plane_idx) const
 	return yuv_gl_textures[p_plane_idx];
 }
 
+bool FFmpegVideoStreamPlayback::has_zerocopy_textures() const {
+	return use_zero_copy && !zero_copy_failed && zero_copy.has_textures();
+}
+
+RID FFmpegVideoStreamPlayback::get_zerocopy_texture_rid(int p_plane_idx) const {
+	ERR_FAIL_INDEX_V(p_plane_idx, 2, RID());
+	return zero_copy.get_rid(p_plane_idx);
+}
+
+bool FFmpegVideoStreamPlayback::is_zero_copy() const {
+	return use_zero_copy && !zero_copy_failed;
+}
+
+FFmpegVideoStreamPlayback::~FFmpegVideoStreamPlayback() {
+	// Drop the retained DMABuf frames before the GL resources go.
+	retired_frames[0].unref();
+	retired_frames[1].unref();
+	last_frame.unref();
+	zero_copy.release();
+}
+
 void FFmpegVideoStreamPlayback::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("has_zerocopy_textures"), &FFmpegVideoStreamPlayback::has_zerocopy_textures);
+	ClassDB::bind_method(D_METHOD("get_zerocopy_texture_rid", "plane_idx"), &FFmpegVideoStreamPlayback::get_zerocopy_texture_rid);
+	ClassDB::bind_method(D_METHOD("is_zero_copy"), &FFmpegVideoStreamPlayback::is_zero_copy);
 	ClassDB::bind_method(D_METHOD("has_yuv_textures"), &FFmpegVideoStreamPlayback::has_yuv_textures);
 	ClassDB::bind_method(D_METHOD("get_yuv_texture", "plane_idx"), &FFmpegVideoStreamPlayback::get_yuv_texture);
 	ClassDB::bind_method(D_METHOD("set_playback_speed", "speed"), &FFmpegVideoStreamPlayback::set_playback_speed);

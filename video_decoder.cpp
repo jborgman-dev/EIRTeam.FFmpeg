@@ -516,6 +516,30 @@ void VideoDecoder::_read_decoded_frames(AVFrame *p_received_frame) {
 			continue;
 		}
 
+		if (p_received_frame->format == AV_PIX_FMT_DRM_PRIME && zero_copy_output.is_set()) {
+			// Zero-copy route: keep the frame in its DMABuf; the playback imports
+			// it as GL textures through EGL. The AVFrame (and thus the decoder
+			// pool buffer) stays referenced by the DecodedFrame until the
+			// playback retires it.
+			Ref<FFmpegFrame> hw_frame;
+			hw_frame.instantiate();
+			av_frame_move_ref(hw_frame->get_frame(), p_received_frame);
+			if (!hw_first_frame_logged) {
+				print_line("HEVC hardware decode active (V4L2 request, zero-copy DMABuf)");
+				hw_first_frame_logged = true;
+			}
+			last_decoded_frame_time.set(frame_time);
+			Ref<DecodedFrame> hw_decoded = memnew(DecodedFrame(frame_time, Ref<Image>()));
+			hw_decoded->set_hw_frame(hw_frame);
+			hw_decoded->set_format(FFmpegFrameFormat::NV12_DMABUF);
+			decoded_frames_mutex->lock();
+			if (!skip_current_outputs.is_set()) {
+				decoded_frames.push_back(hw_decoded);
+			}
+			decoded_frames_mutex->unlock();
+			continue;
+		}
+
 		if (p_received_frame->format == AV_PIX_FMT_DRM_PRIME) {
 			ZoneNamedN(hw_frame_download, "HW frame download", true);
 			if (!hw_sw_frame.is_valid()) {
