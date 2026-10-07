@@ -205,6 +205,7 @@ void FFmpegVideoStreamPlayback::update_internal(double p_delta) {
 			retired_frames[0] = last_frame;
 		}
 		last_frame = next_frame->get();
+		frames_consumed++;
 		last_frame_image = last_frame->get_image();
 #ifdef FFMPEG_MT_GPU_UPLOAD
 		last_frame_texture = last_frame->get_texture();
@@ -468,6 +469,26 @@ bool FFmpegVideoStreamPlayback::is_zero_copy() const {
 	return use_zero_copy && !zero_copy_failed;
 }
 
+double FFmpegVideoStreamPlayback::get_stream_fps() const {
+	return decoder.is_valid() ? decoder->get_frame_rate() : 0.0;
+}
+
+Vector2i FFmpegVideoStreamPlayback::get_video_size() const {
+	return decoder.is_valid() ? decoder->get_size() : Vector2i();
+}
+
+double FFmpegVideoStreamPlayback::get_decoder_lag_ms() const {
+	if (!decoder.is_valid() || !playing || paused) {
+		return 0.0;
+	}
+	double lag = playback_position - decoder->get_last_decoded_frame_time();
+	// A loop wrap looks like a huge negative/positive jump; report only real lag.
+	if (lag < 0.0 || lag > decoder->get_duration() * 0.5) {
+		return 0.0;
+	}
+	return lag;
+}
+
 FFmpegVideoStreamPlayback::~FFmpegVideoStreamPlayback() {
 	// Drop the retained DMABuf frames before the GL resources go.
 	retired_frames[0].unref();
@@ -480,6 +501,10 @@ void FFmpegVideoStreamPlayback::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("has_zerocopy_textures"), &FFmpegVideoStreamPlayback::has_zerocopy_textures);
 	ClassDB::bind_method(D_METHOD("get_zerocopy_texture_rid", "plane_idx"), &FFmpegVideoStreamPlayback::get_zerocopy_texture_rid);
 	ClassDB::bind_method(D_METHOD("is_zero_copy"), &FFmpegVideoStreamPlayback::is_zero_copy);
+	ClassDB::bind_method(D_METHOD("get_frames_consumed"), &FFmpegVideoStreamPlayback::get_frames_consumed);
+	ClassDB::bind_method(D_METHOD("get_stream_fps"), &FFmpegVideoStreamPlayback::get_stream_fps);
+	ClassDB::bind_method(D_METHOD("get_video_size"), &FFmpegVideoStreamPlayback::get_video_size);
+	ClassDB::bind_method(D_METHOD("get_decoder_lag_ms"), &FFmpegVideoStreamPlayback::get_decoder_lag_ms);
 	ClassDB::bind_method(D_METHOD("has_yuv_textures"), &FFmpegVideoStreamPlayback::has_yuv_textures);
 	ClassDB::bind_method(D_METHOD("get_yuv_texture", "plane_idx"), &FFmpegVideoStreamPlayback::get_yuv_texture);
 	ClassDB::bind_method(D_METHOD("set_playback_speed", "speed"), &FFmpegVideoStreamPlayback::set_playback_speed);

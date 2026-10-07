@@ -130,6 +130,10 @@ class FFmpegVideoStreamPlayback : public VideoStreamPlayback {
 	bool looping = false;
 	bool buffering = false;
 	int frames_processed = 0;
+	// Every decoded frame taken from the queue (shown or skipped over while
+	// catching up). Divided by wall time this is the rate the decoder actually
+	// sustains for this stream - the input for the Strain meter in Godot.
+	int64_t frames_consumed = 0;
 	void seek_into_sync();
 	double get_current_frame_time();
 	bool check_next_frame_valid(Ref<DecodedFrame> p_decoded_frame);
@@ -181,6 +185,14 @@ public:
 	bool has_zerocopy_textures() const;
 	RID get_zerocopy_texture_rid(int p_plane_idx) const;
 	bool is_zero_copy() const;
+
+	// Strain-meter inputs: cumulative decoded frames consumed, the stream's
+	// nominal frame rate, the frame size and how far the clock currently trails
+	// the decoder (ms, 0 when the decoder keeps up).
+	int64_t get_frames_consumed() const { return frames_consumed; }
+	double get_stream_fps() const;
+	Vector2i get_video_size() const;
+	double get_decoder_lag_ms() const;
 
 	STREAM_FUNC_REDIRECT_0_CONST(bool, is_paused);
 	STREAM_FUNC_REDIRECT_1(void, update, double, p_delta);

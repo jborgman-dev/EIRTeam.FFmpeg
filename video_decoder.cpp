@@ -935,6 +935,20 @@ double VideoDecoder::get_duration() const {
 	return duration;
 }
 
+double VideoDecoder::get_frame_rate() const {
+	if (video_stream == nullptr) {
+		return 0.0;
+	}
+	AVRational r = video_stream->avg_frame_rate;
+	if (r.num <= 0 || r.den <= 0) {
+		r = video_stream->r_frame_rate;
+	}
+	if (r.num <= 0 || r.den <= 0) {
+		return 0.0;
+	}
+	return av_q2d(r);
+}
+
 Vector2i VideoDecoder::get_size() const {
 	if (video_codec_context) {
 		return Vector2i(video_codec_context->width, video_codec_context->height);

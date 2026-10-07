@@ -214,6 +214,8 @@ public:
 	bool is_running() const;
 	double get_duration() const;
 	Vector2i get_size() const;
+	// Nominal frame rate of the video stream (0 when unknown).
+	double get_frame_rate() const;
 	int get_audio_mix_rate() const;
 	int get_audio_channel_count() const;
 	FFmpegFrameFormat get_frame_format() const { return frame_format; }
