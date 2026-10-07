@@ -141,6 +141,23 @@ void FFmpegVideoStreamPlayback::update_internal(double p_delta) {
 
 	playback_position += p_delta * playback_speed * 1000.0f;
 
+	// Decoder slower than real time (e.g. many hardware streams sharing one
+	// decoder block): instead of letting the clock run ahead until the frames
+	// are LENIENCE_BEFORE_SEEK late and then jumping forward with a seek (a
+	// visible hitch every couple of seconds, plus a costly decoder flush), let
+	// the clock follow the decoder. Playback then slows down smoothly to the
+	// rate the decoder can sustain. Only while the decoder is really behind and
+	// not across a loop wrap (where the newest decoded time legitimately drops
+	// back to ~0 while the clock sits near the end).
+	{
+		const double follow_slack_ms = 20.0; // ~one frame at 60 fps
+		double newest = decoder->get_last_decoded_frame_time();
+		double lag = playback_position - newest;
+		if (lag > follow_slack_ms && lag < decoder->get_duration() * 0.5 && decoder->is_running()) {
+			playback_position = newest + follow_slack_ms;
+		}
+	}
+
 	if (decoder->get_decoder_state() == VideoDecoder::DecoderState::END_OF_STREAM && available_frames.size() == 0) {
 		// if at the end of the stream but our playback enters a valid time region again, a seek operation is required to get the decoder back on track.
 		if (playback_position < decoder->get_last_decoded_frame_time()) {
